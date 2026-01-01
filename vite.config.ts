@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  base: '/health-pwa/',
+  base: '/',
   plugins: [
     react(),
     VitePWA({
@@ -27,7 +27,7 @@ export default defineConfig({
         description: 'تطبيق ذكي لتحسين الصحة البدنية والنفسية',
         lang: 'ar-SA',
         dir: 'rtl',
-        start_url: '/health-pwa/',
+        start_url: '/',
         display: 'standalone',
         orientation: 'portrait',
         background_color: '#ffffff',
