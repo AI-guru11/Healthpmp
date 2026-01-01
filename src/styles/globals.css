@@ -1,0 +1,36 @@
+:root {
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 2rem;
+  --font-arabic: 'Cairo', 'Tajawal', system-ui, -apple-system, sans-serif;
+}
+
+* {
+  margin-block-start: 0;
+  margin-block-end: 0;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  padding-block-start: 0;
+  padding-block-end: 0;
+  padding-inline-start: 0;
+  padding-inline-end: 0;
+  box-sizing: border-box;
+}
+
+body {
+  direction: rtl;
+  font-family: var(--font-arabic);
+  text-align: start;
+  background: var(--background);
+  color: var(--text);
+}
+
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+button {
+  font-family: inherit;
+}
