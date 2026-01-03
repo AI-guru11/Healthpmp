@@ -14,7 +14,7 @@ const Page = styled.div`
 `;
 
 const Card = styled.div`
-  inline-size: min(860px, 100%);
+  inline-size: min(920px, 100%);
   background: rgba(255, 255, 255, 0.92);
   border-radius: 18px;
   box-shadow: 0 14px 48px rgba(0, 0, 0, 0.18);
@@ -38,6 +38,7 @@ const Header = styled.div`
     margin: 6px 0 0;
     color: #6b7280;
     font-size: 13px;
+    line-height: 1.55;
   }
 `;
 
@@ -45,6 +46,7 @@ const Actions = styled.div`
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
 `;
 
 const Button = styled.button<{ $variant?: 'primary' | 'ghost' | 'danger' }>`
@@ -79,7 +81,6 @@ const ScannerTarget = styled.div`
   inline-size: 100%;
   min-block-size: 360px;
 
-  /* Quagga inserts a video/canvas inside */
   video, canvas {
     inline-size: 100%;
     block-size: auto;
@@ -91,13 +92,14 @@ const Message = styled.div<{ $kind?: 'error' | 'info' }>`
   padding: 10px 12px;
   border-radius: 12px;
   font-size: 13px;
+  line-height: 1.55;
   ${({ $kind }) =>
     $kind === 'error'
       ? `background: rgba(231, 76, 60, 0.10); border: 1px solid rgba(231, 76, 60, 0.22); color: #b42318;`
       : `background: rgba(0,0,0,0.05); border: 1px solid rgba(0,0,0,0.10); color: #374151;`}
 `;
 
-const ProductBox = styled.div`
+const Box = styled.div`
   margin-top: 14px;
   background: #fff;
   border: 1px solid rgba(0,0,0,.08);
@@ -137,7 +139,7 @@ const Metric = styled.div`
   .v { margin-top: 6px; color: #111827; font-size: 18px; font-weight: 900; }
 `;
 
-const QtyRow = styled.div`
+const TwoCol = styled.div`
   margin-top: 12px;
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -146,6 +148,13 @@ const QtyRow = styled.div`
   @media (max-width: 760px) {
     grid-template-columns: 1fr;
   }
+`;
+
+const Label = styled.div`
+  font-weight: 900;
+  margin-bottom: 6px;
+  color: #111827;
+  font-size: 13px;
 `;
 
 const Input = styled.input`
@@ -176,27 +185,49 @@ export const BarcodeScanPage = () => {
   const targetRef = useRef<HTMLDivElement | null>(null);
 
   const [scanning, setScanning] = useState(false);
-  const [locked, setLocked] = useState(false); // throttle detections
+  const [locked, setLocked] = useState(false);
   const [barcode, setBarcode] = useState<string | null>(null);
 
+  // إدخال يدوي للباركود (عند فشل الالتقاط)
+  const [barcodeInput, setBarcodeInput] = useState('');
+
   const [info, setInfo] = useState<ProductInfo | null>(null);
+
+  // إدخال يدوي للمنتج (Fallback عندما لا يوجد المنتج في OpenFoodFacts)
+  const [manualName, setManualName] = useState('');
+  const [manualKcal100g, setManualKcal100g] = useState<number | ''>('');
+  const [manualProtein100g, setManualProtein100g] = useState<number | ''>('');
+  const [manualCarbs100g, setManualCarbs100g] = useState<number | ''>('');
+  const [manualFats100g, setManualFats100g] = useState<number | ''>('');
+
   const [qty, setQty] = useState<number>(100);
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [adding, setAdding] = useState(false);
 
-  const kcalForQty = useMemo(() => {
-    if (!info?.kcal100g || !Number.isFinite(qty) || qty <= 0) return null;
-    return Math.round((qty / 100) * info.kcal100g);
-  }, [info?.kcal100g, qty]);
+  const kcal100gEffective = useMemo(() => {
+    if (info?.kcal100g != null) return info.kcal100g;
+    const v = Number(manualKcal100g);
+    return Number.isFinite(v) ? v : null;
+  }, [info?.kcal100g, manualKcal100g]);
 
-  const stop = async () => {
-    try {
-      Quagga.offDetected(onDetected);
-    } catch {}
-    try {
-      Quagga.stop();
-    } catch {}
+  const kcalForQty = useMemo(() => {
+    if (!kcal100gEffective || !Number.isFinite(qty) || qty <= 0) return null;
+    return Math.round((qty / 100) * kcal100gEffective);
+  }, [kcal100gEffective, qty]);
+
+  const stop = () => {
+    try { Quagga.offDetected(onDetected); } catch {}
+    try { Quagga.stop(); } catch {}
     setScanning(false);
+  };
+
+  const resetProductStates = () => {
+    setInfo(null);
+    setManualName('');
+    setManualKcal100g('');
+    setManualProtein100g('');
+    setManualCarbs100g('');
+    setManualFats100g('');
   };
 
   const onDetected = (data: any) => {
@@ -205,6 +236,7 @@ export const BarcodeScanPage = () => {
     if (!code) return;
     setLocked(true);
     setBarcode(code);
+    setBarcodeInput(code);
     setMessage({ kind: 'info', text: `تم التقاط الباركود: ${code}` });
     stop();
   };
@@ -212,8 +244,8 @@ export const BarcodeScanPage = () => {
   const start = async () => {
     setMessage(null);
     setBarcode(null);
-    setInfo(null);
     setLocked(false);
+    resetProductStates();
 
     const target = targetRef.current;
     if (!target) {
@@ -221,7 +253,6 @@ export const BarcodeScanPage = () => {
       return;
     }
 
-    // Important: Quagga needs a real DOM node to inject video/canvas into
     try {
       await new Promise<void>((resolve, reject) => {
         Quagga.init(
@@ -231,9 +262,12 @@ export const BarcodeScanPage = () => {
               target,
               constraints: {
                 facingMode: 'environment',
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
               }
             },
-            locator: { patchSize: 'medium', halfSample: true },
+            locator: { patchSize: 'large', halfSample: false },
+            frequency: 10,
             numOfWorkers: 2,
             decoder: {
               readers: [
@@ -256,22 +290,18 @@ export const BarcodeScanPage = () => {
       Quagga.onDetected(onDetected);
       Quagga.start();
       setScanning(true);
-      setMessage({ kind: 'info', text: 'وجّه الكاميرا نحو الباركود حتى يتم التقاطه.' });
-    } catch (e: any) {
+      setMessage({ kind: 'info', text: 'وجّه الكاميرا نحو الباركود. قرّب الباركود وتجنب اللمعان.' });
+    } catch {
       setScanning(false);
       setMessage({
         kind: 'error',
-        text:
-          'فشل تشغيل الكاميرا. تأكد من منح إذن الكاميرا وأنك على HTTPS (Netlify).'
+        text: 'فشل تشغيل الكاميرا. تأكد من منح إذن الكاميرا وأنك على HTTPS (Netlify).'
       });
     }
   };
 
   useEffect(() => {
-    // Cleanup on unmount
-    return () => {
-      stop();
-    };
+    return () => { stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -279,16 +309,19 @@ export const BarcodeScanPage = () => {
     async function fetchProduct() {
       if (!barcode) return;
 
-      setInfo(null);
-      setMessage({ kind: 'info', text: 'جاري جلب بيانات المنتج…' });
+      resetProductStates();
+      setMessage({ kind: 'info', text: 'جاري جلب بيانات المنتج من OpenFoodFacts…' });
 
       try {
         const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`);
         if (!res.ok) throw new Error('فشل الطلب من قاعدة بيانات المنتجات.');
         const json = await res.json();
 
-        if (!json?.product) {
-          setMessage({ kind: 'error', text: 'لم يتم العثور على المنتج في قاعدة البيانات.' });
+        if (json?.status !== 1 || !json?.product) {
+          setMessage({
+            kind: 'error',
+            text: 'المنتج غير موجود في OpenFoodFacts (شائع مع منتجات محلية). أدخل السعرات يدوياً ثم أضفه لاستهلاك اليوم.'
+          });
           return;
         }
 
@@ -315,45 +348,74 @@ export const BarcodeScanPage = () => {
           fats100g
         });
 
-        setMessage({ kind: 'info', text: 'تم جلب بيانات المنتج. أدخل الكمية ثم أضفها لسجل اليوم.' });
+        if (kcal100g == null) {
+          setManualName(name);
+          setMessage({
+            kind: 'error',
+            text: 'تم العثور على المنتج، لكن بيانات السعرات غير متوفرة. أدخل السعرات يدوياً ثم أضفه.'
+          });
+        } else {
+          setMessage({ kind: 'info', text: 'تم جلب بيانات المنتج. أدخل الكمية ثم أضفها لاستهلاك اليوم.' });
+        }
       } catch {
-        setMessage({ kind: 'error', text: 'تعذر جلب بيانات المنتج. جرّب مرة أخرى.' });
+        setMessage({ kind: 'error', text: 'تعذر جلب بيانات المنتج. يمكنك الإدخال اليدوي كحل بديل.' });
       }
     }
 
     fetchProduct();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [barcode]);
 
-  const addToToday = async () => {
-    if (!info) return;
-    if (!kcalForQty) {
-      setMessage({ kind: 'error', text: 'لا يمكن إضافة هذا المنتج لأن بيانات السعرات غير متوفرة أو الكمية غير صحيحة.' });
+  const searchByTypedBarcode = () => {
+    const code = barcodeInput.trim();
+    if (code.length < 8) {
+      setMessage({ kind: 'error', text: 'أدخل باركود صحيح (على الأقل 8 أرقام).' });
       return;
     }
+    setLocked(true);
+    setBarcode(code);
+  };
+
+  const addToToday = async () => {
+    const code = barcodeInput.trim();
+    if (code.length < 8) {
+      setMessage({ kind: 'error', text: 'أدخل باركود صحيح.' });
+      return;
+    }
+
+    const kcalQty = kcalForQty;
+    if (!kcalQty) {
+      setMessage({ kind: 'error', text: 'أدخل السعرات لكل 100g + الكمية (جرام) بشكل صحيح.' });
+      return;
+    }
+
+    const nameEffective = (info?.name || manualName || 'منتج (يدوي)').trim();
 
     setAdding(true);
     try {
       const { foodLog } = await initDatabase();
 
+      const p100 = info?.protein100g ?? (Number.isFinite(Number(manualProtein100g)) ? Number(manualProtein100g) : null);
+      const c100 = info?.carbs100g ?? (Number.isFinite(Number(manualCarbs100g)) ? Number(manualCarbs100g) : null);
+      const f100 = info?.fats100g ?? (Number.isFinite(Number(manualFats100g)) ? Number(manualFats100g) : null);
+
       const entry: FoodLogEntry = {
         id: crypto.randomUUID(),
         timestamp: Date.now(),
         mealType: 'snack',
-        detectedCalories: kcalForQty,
-        protein: info.protein100g != null ? Math.round((qty / 100) * info.protein100g) : undefined,
-        carbs: info.carbs100g != null ? Math.round((qty / 100) * info.carbs100g) : undefined,
-        fats: info.fats100g != null ? Math.round((qty / 100) * info.fats100g) : undefined,
+        detectedCalories: kcalQty,
+        protein: p100 != null ? Math.round((qty / 100) * p100) : undefined,
+        carbs: c100 != null ? Math.round((qty / 100) * c100) : undefined,
+        fats: f100 != null ? Math.round((qty / 100) * f100) : undefined,
         servingSize: qty,
-        productName: info.name,
-        barcode: info.barcode,
-        confidence: 1
+        productName: nameEffective,
+        barcode: code,
+        confidence: info ? 1 : 0.6
       };
 
       await foodLog.setItem(entry.id, entry);
 
-      setMessage({ kind: 'info', text: 'تمت الإضافة لسجل اليوم بنجاح. سيتم تحويلك للوحة التحكم.' });
-
-      // Go back to dashboard
+      setMessage({ kind: 'info', text: 'تمت الإضافة بنجاح. سيتم تحويلك للوحة التحكم.' });
       setTimeout(() => navigate('/dashboard', { replace: true }), 400);
     } catch {
       setMessage({ kind: 'error', text: 'حدث خطأ أثناء حفظ سجل الطعام.' });
@@ -368,7 +430,10 @@ export const BarcodeScanPage = () => {
         <Header>
           <div>
             <h1>مسح باركود المنتج</h1>
-            <p>امسح باركود المنتج لجلب السعرات وإضافتها لاستهلاكك اليومي.</p>
+            <p>
+              إذا لم يتم العثور على المنتج في قاعدة البيانات (OpenFoodFacts) — وهذا شائع للمنتجات المحلية —
+              استخدم الإدخال اليدوي للسعرات ثم أضفه لاستهلاك اليوم.
+            </p>
           </div>
           <Actions>
             <Button $variant="ghost" onClick={() => navigate('/dashboard', { replace: true })}>رجوع للوحة التحكم</Button>
@@ -380,39 +445,115 @@ export const BarcodeScanPage = () => {
           </Actions>
         </Header>
 
+        <Box>
+          <h2>إدخال الباركود يدوياً</h2>
+          <TwoCol>
+            <div>
+              <Label>الباركود</Label>
+              <Input
+                inputMode="numeric"
+                placeholder="مثال: 628xxxxxxxxxx"
+                value={barcodeInput}
+                onChange={(e) => setBarcodeInput(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'end', gap: 10, flexWrap: 'wrap' }}>
+              <Button $variant="primary" onClick={searchByTypedBarcode}>بحث بالباركود</Button>
+              <Button
+                $variant="ghost"
+                onClick={() => {
+                  setBarcode(null);
+                  setLocked(false);
+                  resetProductStates();
+                  setMessage(null);
+                }}
+              >
+                تفريغ
+              </Button>
+            </div>
+          </TwoCol>
+        </Box>
+
         <ScannerWrap>
           <ScannerTarget ref={targetRef} />
         </ScannerWrap>
 
         {message && <Message $kind={message.kind}>{message.text}</Message>}
 
-        {info && (
-          <ProductBox>
-            <h2>{info.name}</h2>
-            <p className="muted">Barcode: {info.barcode}</p>
+        {(info || barcodeInput.trim().length >= 8) && (
+          <Box>
+            <h2>بيانات المنتج</h2>
+            <p className="muted">Barcode: <b>{barcodeInput.trim() || '—'}</b></p>
 
-            <Grid>
-              <Metric>
-                <div className="k">Calories / 100g</div>
-                <div className="v">{info.kcal100g ?? '—'}</div>
-              </Metric>
-              <Metric>
-                <div className="k">Protein / 100g</div>
-                <div className="v">{info.protein100g ?? '—'}</div>
-              </Metric>
-              <Metric>
-                <div className="k">Carbs / 100g</div>
-                <div className="v">{info.carbs100g ?? '—'}</div>
-              </Metric>
-              <Metric>
-                <div className="k">Fats / 100g</div>
-                <div className="v">{info.fats100g ?? '—'}</div>
-              </Metric>
-            </Grid>
+            {info && (
+              <>
+                <p className="muted" style={{ marginTop: 6 }}>الاسم: <b>{info.name}</b></p>
+                <Grid>
+                  <Metric><div className="k">Calories / 100g</div><div className="v">{info.kcal100g ?? '—'}</div></Metric>
+                  <Metric><div className="k">Protein / 100g</div><div className="v">{info.protein100g ?? '—'}</div></Metric>
+                  <Metric><div className="k">Carbs / 100g</div><div className="v">{info.carbs100g ?? '—'}</div></Metric>
+                  <Metric><div className="k">Fats / 100g</div><div className="v">{info.fats100g ?? '—'}</div></Metric>
+                </Grid>
+              </>
+            )}
 
-            <QtyRow>
+            <TwoCol>
               <div>
-                <div style={{ fontWeight: 900, marginBottom: 6, color: '#111827' }}>الكمية (جرام)</div>
+                <Label>اسم المنتج (اختياري)</Label>
+                <Input
+                  placeholder="مثال: عصير ليمون"
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label>السعرات لكل 100g (مطلوب إذا لم تتوفر)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="مثال: 45"
+                  value={manualKcal100g}
+                  onChange={(e) => setManualKcal100g(e.target.value === '' ? '' : Number(e.target.value))}
+                />
+              </div>
+            </TwoCol>
+
+            <TwoCol>
+              <div>
+                <Label>Protein / 100g (اختياري)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="0"
+                  value={manualProtein100g}
+                  onChange={(e) => setManualProtein100g(e.target.value === '' ? '' : Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <Label>Carbs / 100g (اختياري)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="0"
+                  value={manualCarbs100g}
+                  onChange={(e) => setManualCarbs100g(e.target.value === '' ? '' : Number(e.target.value))}
+                />
+              </div>
+            </TwoCol>
+
+            <TwoCol>
+              <div>
+                <Label>Fats / 100g (اختياري)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  placeholder="0"
+                  value={manualFats100g}
+                  onChange={(e) => setManualFats100g(e.target.value === '' ? '' : Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <Label>الكمية (جرام)</Label>
                 <Input
                   type="number"
                   min="1"
@@ -420,22 +561,25 @@ export const BarcodeScanPage = () => {
                   onChange={(e) => setQty(Number(e.target.value))}
                 />
               </div>
-              <div>
-                <div style={{ fontWeight: 900, marginBottom: 6, color: '#111827' }}>السعرات لهذه الكمية</div>
-                <Input
-                  readOnly
-                  value={kcalForQty != null ? `${kcalForQty} kcal` : '—'}
-                />
-              </div>
-            </QtyRow>
+            </TwoCol>
 
-            <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <Button $variant="primary" onClick={addToToday} disabled={adding || !kcalForQty}>
-                {adding ? 'جاري الإضافة…' : 'أضف لاستهلاك اليوم'}
-              </Button>
-              <Button $variant="ghost" onClick={start}>مسح منتج آخر</Button>
-            </div>
-          </ProductBox>
+            <TwoCol>
+              <div>
+                <Label>السعرات لهذه الكمية</Label>
+                <Input readOnly value={kcalForQty != null ? `${kcalForQty} kcal` : '—'} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'end', gap: 10, flexWrap: 'wrap' }}>
+                <Button $variant="primary" onClick={addToToday} disabled={adding || !kcalForQty}>
+                  {adding ? 'جاري الإضافة…' : 'أضف لاستهلاك اليوم'}
+                </Button>
+                <Button $variant="ghost" onClick={start}>مسح منتج آخر</Button>
+              </div>
+            </TwoCol>
+
+            <Message $kind="info" style={{ marginTop: 12 }}>
+              تلميح: قرّب الباركود، ثبّت اليد، وتجنب اللمعان. إذا لم يوجد المنتج في OpenFoodFacts، الإدخال اليدوي هو الحل الصحيح.
+            </Message>
+          </Box>
         )}
       </Card>
     </Page>
