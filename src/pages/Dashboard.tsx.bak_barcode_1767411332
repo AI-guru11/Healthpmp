@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { useNavigate, useParams } from 'react-router-dom';
 import { initDatabase } from '../lib/database/indexeddb';
 import { CryptoEngine } from '../lib/crypto/aes-encryption';
-import type { UserProfile, FoodLogEntry } from '../types/health';
+import type { UserProfile } from '../types/health';
 
 const Page = styled.div`
   min-block-size: 100vh;
@@ -47,21 +47,27 @@ const Actions = styled.div`
   display: flex;
   gap: 10px;
   align-items: center;
-  flex-wrap: wrap;
 `;
 
 const Button = styled.button<{ $variant?: 'primary' | 'ghost' }>`
   border: none;
   border-radius: 12px;
   padding: 10px 12px;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
   font-size: 14px;
 
   ${({ $variant }) =>
     $variant === 'primary'
-      ? `background: #27ae60; color: #fff;`
-      : `background: transparent; border: 1px solid rgba(0,0,0,.12); color: #111827;`}
+      ? `
+        background: #27ae60;
+        color: #fff;
+      `
+      : `
+        background: transparent;
+        border: 1px solid rgba(0,0,0,.12);
+        color: #111827;
+      `}
 `;
 
 const Grid = styled.div`
@@ -84,19 +90,18 @@ const Metric = styled.div`
   .k {
     color: #6b7280;
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
   }
   .v {
     margin-top: 8px;
     font-size: 26px;
-    font-weight: 900;
+    font-weight: 800;
     color: #111827;
   }
   .hint {
     margin-top: 6px;
     color: #6b7280;
     font-size: 12px;
-    font-weight: 600;
   }
 `;
 
@@ -132,42 +137,18 @@ const MacroBox = styled.div`
     .k {
       color: #6b7280;
       font-size: 13px;
-      font-weight: 800;
+      font-weight: 700;
     }
     .v {
       margin-top: 6px;
       font-size: 20px;
-      font-weight: 900;
+      font-weight: 800;
       color: #111827;
     }
     .u {
       color: #6b7280;
       font-size: 12px;
-      font-weight: 700;
-    }
-  }
-`;
-
-const TodayBox = styled.div`
-  margin-top: 14px;
-  background: rgba(102, 126, 234, 0.10);
-  border: 1px solid rgba(102, 126, 234, 0.20);
-  border-radius: 14px;
-  padding: 14px;
-
-  h2 {
-    margin: 0 0 10px;
-    font-size: 16px;
-    color: #111827;
-  }
-
-  .row {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-
-    @media (max-width: 760px) {
-      grid-template-columns: 1fr;
+      font-weight: 600;
     }
   }
 `;
@@ -180,8 +161,16 @@ const Message = styled.p<{ $kind?: 'error' | 'info' }>`
 
   ${({ $kind }) =>
     $kind === 'error'
-      ? `background: rgba(231, 76, 60, 0.10); border: 1px solid rgba(231, 76, 60, 0.22); color: #b42318;`
-      : `background: rgba(0,0,0,0.05); border: 1px solid rgba(0,0,0,0.10); color: #374151;`}
+      ? `
+        background: rgba(231, 76, 60, 0.10);
+        border: 1px solid rgba(231, 76, 60, 0.22);
+        color: #b42318;
+      `
+      : `
+        background: rgba(0,0,0,0.05);
+        border: 1px solid rgba(0,0,0,0.10);
+        color: #374151;
+      `}
 `;
 
 function formatActivity(ar: UserProfile['activityLevel']) {
@@ -195,18 +184,13 @@ function formatActivity(ar: UserProfile['activityLevel']) {
   }
 }
 
-function startOfTodayMs() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
 export const DashboardPage = () => {
   const navigate = useNavigate();
   const params = useParams();
   const routeProfileId = params.profileId;
 
   const resolvedProfileId = useMemo(() => {
+    // Supports both /dashboard/:profileId and /dashboard (last saved)
     if (routeProfileId) return routeProfileId;
     const last = localStorage.getItem('healthpmp_last_profile_id');
     return last || null;
@@ -215,9 +199,6 @@ export const DashboardPage = () => {
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const [todayCalories, setTodayCalories] = useState<number>(0);
-  const [todayCount, setTodayCount] = useState<number>(0);
 
   useEffect(() => {
     let alive = true;
@@ -232,33 +213,20 @@ export const DashboardPage = () => {
           throw new Error('لا يوجد ملف محفوظ لعرضه. ارجع وأنشئ ملفك أولاً.');
         }
 
-        const { userProfiles, foodLog } = await initDatabase();
-
-        // Load profile
+        const { userProfiles } = await initDatabase();
         const encrypted = await userProfiles.getItem<string>(resolvedProfileId);
-        if (!encrypted) throw new Error('لم يتم العثور على بيانات هذا الملف. قد يكون تم حذف التخزين المحلي.');
+
+        if (!encrypted) {
+          throw new Error('لم يتم العثور على بيانات هذا الملف. قد يكون تم حذف التخزين المحلي.');
+        }
 
         const key = await CryptoEngine.deriveKey(`health-coach-${resolvedProfileId}`);
         const decrypted = await CryptoEngine.decrypt(encrypted, key);
+
         const parsed = JSON.parse(decrypted) as UserProfile;
-
-        // Load today's food log totals
-        const start = startOfTodayMs();
-        let total = 0;
-        let count = 0;
-
-        await foodLog.iterate((value: any) => {
-          const entry = value as FoodLogEntry;
-          if (entry?.timestamp && entry.timestamp >= start) {
-            total += Number(entry.detectedCalories || 0);
-            count += 1;
-          }
-        });
 
         if (!alive) return;
         setProfile(parsed);
-        setTodayCalories(Math.round(total));
-        setTodayCount(count);
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message || 'حدث خطأ أثناء تحميل الملف.');
@@ -269,13 +237,16 @@ export const DashboardPage = () => {
     }
 
     run();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [resolvedProfileId]);
 
-  const remaining = useMemo(() => {
-    if (!profile) return null;
-    return Math.max(0, profile.tdee - todayCalories);
-  }, [profile, todayCalories]);
+  const onBack = () => navigate('/', { replace: true });
+
+  const onOpenIdRoute = () => {
+    if (resolvedProfileId) navigate(`/dashboard/${resolvedProfileId}`, { replace: true });
+  };
 
   return (
     <Page>
@@ -283,12 +254,14 @@ export const DashboardPage = () => {
         <Header>
           <TitleWrap>
             <h1>لوحة التحكم</h1>
-            <p>عرض ملفك الصحي المحفوظ + استهلاكك اليومي.</p>
+            <p>عرض ملفك الصحي المحفوظ واحتياجك اليومي.</p>
           </TitleWrap>
 
           <Actions>
-            <Button $variant="ghost" onClick={() => navigate('/', { replace: true })}>تعديل البيانات</Button>
-            <Button $variant="primary" onClick={() => navigate('/scan/barcode')}>مسح باركود</Button>
+            <Button $variant="ghost" onClick={onBack}>تعديل البيانات</Button>
+            <Button $variant="primary" onClick={onOpenIdRoute} disabled={!resolvedProfileId}>
+              تثبيت رابط الملف
+            </Button>
           </Actions>
         </Header>
 
@@ -317,33 +290,8 @@ export const DashboardPage = () => {
               </Metric>
             </Grid>
 
-            <TodayBox>
-              <h2>ملخص اليوم</h2>
-              <div className="row">
-                <Metric>
-                  <div className="k">المستهلك اليوم</div>
-                  <div className="v">{todayCalories}</div>
-                  <div className="hint">سعرة/يوم (من سجلات المنتجات)</div>
-                </Metric>
-                <Metric>
-                  <div className="k">المتبقي</div>
-                  <div className="v">{remaining ?? '—'}</div>
-                  <div className="hint">TDEE - المستهلك</div>
-                </Metric>
-                <Metric>
-                  <div className="k">عدد الإضافات</div>
-                  <div className="v">{todayCount}</div>
-                  <div className="hint">عدد المنتجات المضافة اليوم</div>
-                </Metric>
-              </div>
-
-              <Message $kind="info" style={{ marginTop: 12 }}>
-                ملاحظة: السجل اليومي محفوظ على نفس الجهاز/المتصفح فقط.
-              </Message>
-            </TodayBox>
-
             <MacroBox>
-              <h2>الماكروز اليومية (هدفك اليومي)</h2>
+              <h2>الماكروز اليومية</h2>
               <div className="row">
                 <div className="item">
                   <div className="k">Protein</div>
