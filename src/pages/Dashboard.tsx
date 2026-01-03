@@ -289,6 +289,7 @@ export const DashboardPage = () => {
           <Actions>
             <Button $variant="ghost" onClick={() => navigate('/', { replace: true })}>تعديل البيانات</Button>
             <Button $variant="primary" onClick={() => navigate('/scan/barcode')}>مسح باركود</Button>
+            <Button $variant="primary" onClick={() => navigate('/scan/label')}>تصوير ملصق التغذية</Button>
           </Actions>
         </Header>
 
