@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { useNavigate } from 'react-router-dom';
-import { createWorker } from 'tesseract.js';
+import { createWorker, PSM } from 'tesseract.js';
 import { initDatabase } from '../lib/database/indexeddb';
 import type { FoodLogEntry } from '../types/health';
 
@@ -86,6 +86,14 @@ const Video = styled.video`
 
 const Canvas = styled.canvas`
   display: none;
+`;
+
+const PreviewCanvas = styled.canvas`
+  inline-size: 100%;
+  block-size: auto;
+  display: block;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,.10);
 `;
 
 const Message = styled.div<{ $kind?: 'error' | 'info' }>`
@@ -193,6 +201,26 @@ const Badge = styled.span<{ $color?: 'green' | 'orange' }>`
       : `background: rgba(230, 126, 34, 0.12); color: #e67e22;`}
 `;
 
+const Slider = styled.input`
+  width: 100%;
+  margin-top: 8px;
+`;
+
+const CheckboxLabel = styled.label`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #111827;
+
+  input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+  }
+`;
+
 type ParsedData = {
   caloriesPerServing: number | null;
   servingsPerContainer: number | null;
@@ -214,8 +242,9 @@ function parseNutritionLabel(text: string): ParsedData {
     fats: null,
   };
 
-  // Calories
+  // Calories - enhanced with "Calor" fallback and Arabic
   let match = text.match(/Calories\s*([0-9]{1,4})/i);
+  if (!match) match = text.match(/Calor[a-z]*\s*([0-9]{1,4})/i);
   if (!match) match = text.match(/السعرات(?:\s*الحرارية)?\s*([0-9]{1,4})/i);
   if (match) result.caloriesPerServing = Number(match[1]);
 
@@ -224,7 +253,7 @@ function parseNutritionLabel(text: string): ParsedData {
   if (!match) match = text.match(/عدد\s*الحصص\s*(?:في\s*العبوة)?\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (match) result.servingsPerContainer = Number(match[1]);
 
-  // Serving size
+  // Serving size - enhanced patterns
   match = text.match(/Serving\s*Size\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(ml|mL|g|gm|grams)/i);
   if (!match) match = text.match(/حجم\s*الحصة\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(مل|ml|جم|g)/i);
   if (match) {
@@ -259,14 +288,24 @@ function isParseSuccessful(data: ParsedData): boolean {
   return data.caloriesPerServing !== null && data.servingSizeValue !== null;
 }
 
+type PreprocessMode = 'grayscale-threshold' | 'adaptive-threshold' | 'none';
+
 export const NutritionLabelScanPage = () => {
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+
+  // Crop settings
+  const [cropPercent, setCropPercent] = useState<number>(70);
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Preprocess settings
+  const [preprocessMode, setPreprocessMode] = useState<PreprocessMode>('grayscale-threshold');
 
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState<number>(0);
@@ -291,19 +330,23 @@ export const NutritionLabelScanPage = () => {
     setMessage(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
       });
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
         setCameraActive(true);
-        setMessage({ kind: 'info', text: 'الكاميرا نشطة. ثبّت الهاتف فوق ملصق التغذية واضغط "التقاط وتحليل".' });
+        setMessage({ kind: 'info', text: 'Camera active. Position phone over nutrition label and tap "Capture & Analyze".' });
       }
     } catch {
       setMessage({
         kind: 'error',
-        text: 'فشل تشغيل الكاميرا. تأكد من منح إذن الكاميرا وأنك على HTTPS.'
+        text: 'Failed to start camera. Ensure camera permission is granted and you are on HTTPS.'
       });
     }
   };
@@ -317,6 +360,7 @@ export const NutritionLabelScanPage = () => {
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    setShowPreview(false);
   };
 
   useEffect(() => {
@@ -324,12 +368,151 @@ export const NutritionLabelScanPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const applyCrop = (sourceCanvas: HTMLCanvasElement, cropPercentage: number): HTMLCanvasElement => {
+    const cropCanvas = document.createElement('canvas');
+    const ctx = cropCanvas.getContext('2d');
+    if (!ctx) return sourceCanvas;
+
+    const cropFraction = cropPercentage / 100;
+    const cropWidth = Math.floor(sourceCanvas.width * cropFraction);
+    const cropHeight = Math.floor(sourceCanvas.height * cropFraction);
+    const startX = Math.floor((sourceCanvas.width - cropWidth) / 2);
+    const startY = Math.floor((sourceCanvas.height - cropHeight) / 2);
+
+    cropCanvas.width = cropWidth;
+    cropCanvas.height = cropHeight;
+
+    ctx.drawImage(
+      sourceCanvas,
+      startX, startY, cropWidth, cropHeight,
+      0, 0, cropWidth, cropHeight
+    );
+
+    return cropCanvas;
+  };
+
+  const applyDownscale = (sourceCanvas: HTMLCanvasElement, maxDim: number): HTMLCanvasElement => {
+    const scale = Math.min(maxDim / sourceCanvas.width, maxDim / sourceCanvas.height, 1);
+
+    if (scale >= 1) return sourceCanvas;
+
+    const downscaleCanvas = document.createElement('canvas');
+    const ctx = downscaleCanvas.getContext('2d');
+    if (!ctx) return sourceCanvas;
+
+    const newWidth = Math.floor(sourceCanvas.width * scale);
+    const newHeight = Math.floor(sourceCanvas.height * scale);
+
+    downscaleCanvas.width = newWidth;
+    downscaleCanvas.height = newHeight;
+    ctx.drawImage(sourceCanvas, 0, 0, newWidth, newHeight);
+
+    return downscaleCanvas;
+  };
+
+  const applyPreprocessing = (sourceCanvas: HTMLCanvasElement, mode: PreprocessMode): HTMLCanvasElement => {
+    if (mode === 'none') return sourceCanvas;
+
+    const processCanvas = document.createElement('canvas');
+    const ctx = processCanvas.getContext('2d');
+    if (!ctx) return sourceCanvas;
+
+    processCanvas.width = sourceCanvas.width;
+    processCanvas.height = sourceCanvas.height;
+    ctx.drawImage(sourceCanvas, 0, 0);
+
+    const imageData = ctx.getImageData(0, 0, processCanvas.width, processCanvas.height);
+    const data = imageData.data;
+
+    if (mode === 'grayscale-threshold') {
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        const contrast = 1.5;
+        let adjusted = ((gray - 128) * contrast) + 128;
+        adjusted = adjusted > 128 ? 255 : 0;
+        data[i] = data[i + 1] = data[i + 2] = adjusted;
+      }
+    } else if (mode === 'adaptive-threshold') {
+      // Simple adaptive threshold (local mean)
+      const blockSize = 15;
+      const C = 10;
+      const width = processCanvas.width;
+      const height = processCanvas.height;
+
+      // Convert to grayscale first
+      const grayData = new Uint8ClampedArray(width * height);
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        grayData[i / 4] = gray;
+      }
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let sum = 0;
+          let count = 0;
+
+          for (let by = -Math.floor(blockSize / 2); by <= Math.floor(blockSize / 2); by++) {
+            for (let bx = -Math.floor(blockSize / 2); bx <= Math.floor(blockSize / 2); bx++) {
+              const nx = x + bx;
+              const ny = y + by;
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                sum += grayData[ny * width + nx];
+                count++;
+              }
+            }
+          }
+
+          const mean = sum / count;
+          const pixel = grayData[y * width + x];
+          const threshold = pixel > (mean - C) ? 255 : 0;
+
+          const idx = (y * width + x) * 4;
+          data[idx] = data[idx + 1] = data[idx + 2] = threshold;
+        }
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return processCanvas;
+  };
+
+  const updatePreview = () => {
+    const video = videoRef.current;
+    const previewCanvas = previewCanvasRef.current;
+    if (!video || !previewCanvas) return;
+
+    const ctx = previewCanvas.getContext('2d');
+    if (!ctx) return;
+
+    // Capture current frame at full resolution
+    const captureCanvas = document.createElement('canvas');
+    captureCanvas.width = video.videoWidth;
+    captureCanvas.height = video.videoHeight;
+    const captureCtx = captureCanvas.getContext('2d');
+    if (!captureCtx) return;
+    captureCtx.drawImage(video, 0, 0);
+
+    // Apply crop
+    const croppedCanvas = applyCrop(captureCanvas, cropPercent);
+
+    // Apply downscale
+    const downscaledCanvas = applyDownscale(croppedCanvas, 1200);
+
+    // Apply preprocessing
+    const processedCanvas = applyPreprocessing(downscaledCanvas, preprocessMode);
+
+    // Draw to preview
+    previewCanvas.width = processedCanvas.width;
+    previewCanvas.height = processedCanvas.height;
+    ctx.drawImage(processedCanvas, 0, 0);
+  };
+
   const captureAndOCR = async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    setMessage({ kind: 'info', text: 'جاري التقاط الإطار ومعالجته…' });
+    setMessage({ kind: 'info', text: 'Capturing frame and processing...' });
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -341,44 +524,19 @@ export const NutritionLabelScanPage = () => {
     // Draw video frame to canvas
     ctx.drawImage(video, 0, 0);
 
-    // Downscale to ~1200px on longest side
-    const maxDim = 1200;
-    const scale = Math.min(maxDim / canvas.width, maxDim / canvas.height, 1);
+    // Apply crop-first pipeline
+    const croppedCanvas = applyCrop(canvas, cropPercent);
 
-    if (scale < 1) {
-      const newWidth = Math.floor(canvas.width * scale);
-      const newHeight = Math.floor(canvas.height * scale);
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = newWidth;
-      tempCanvas.height = newHeight;
-      const tempCtx = tempCanvas.getContext('2d');
-      if (tempCtx) {
-        tempCtx.drawImage(canvas, 0, 0, newWidth, newHeight);
-        canvas.width = newWidth;
-        canvas.height = newHeight;
-        ctx.drawImage(tempCanvas, 0, 0);
-      }
-    }
+    // Downscale after crop to max 1200px
+    const downscaledCanvas = applyDownscale(croppedCanvas, 1200);
 
-    // Preprocess: grayscale + contrast + threshold
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
+    // Apply preprocessing
+    const processedCanvas = applyPreprocessing(downscaledCanvas, preprocessMode);
 
-    for (let i = 0; i < data.length; i += 4) {
-      // Grayscale
-      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-
-      // Increase contrast
-      const contrast = 1.5;
-      let adjusted = ((gray - 128) * contrast) + 128;
-
-      // Simple threshold
-      adjusted = adjusted > 128 ? 255 : 0;
-
-      data[i] = data[i + 1] = data[i + 2] = adjusted;
-    }
-
-    ctx.putImageData(imageData, 0, 0);
+    // Copy processed result back to main canvas for OCR
+    canvas.width = processedCanvas.width;
+    canvas.height = processedCanvas.height;
+    ctx.drawImage(processedCanvas, 0, 0);
 
     // Run OCR
     await runOCR(canvas);
@@ -391,8 +549,8 @@ export const NutritionLabelScanPage = () => {
     setOcrMode(null);
 
     try {
-      // Attempt #1: English only
-      setMessage({ kind: 'info', text: 'OCR محاولة #1: إنجليزي فقط…' });
+      // Attempt #1: English only with PSM 6 (uniform block of text)
+      setMessage({ kind: 'info', text: 'OCR Attempt #1: English only (PSM 6)...' });
       const worker1 = await createWorker('eng', 1, {
         logger: (m) => {
           if (m.status === 'recognizing text') {
@@ -401,23 +559,59 @@ export const NutritionLabelScanPage = () => {
         }
       });
 
+      await worker1.setParameters({
+        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+        user_defined_dpi: '300',
+      });
+
       const { data: { text: text1 } } = await worker1.recognize(canvas);
       await worker1.terminate();
 
       const parsed1 = parseNutritionLabel(text1);
 
       if (isParseSuccessful(parsed1)) {
-        // Success with English only
+        // Success with English PSM 6
         setRawText(text1);
         setOcrMode('eng');
         fillFields(parsed1);
-        setMessage({ kind: 'info', text: 'تم التحليل بنجاح باستخدام الإنجليزية فقط. راجع البيانات أدناه.' });
+        setMessage({ kind: 'info', text: 'Analysis successful using English only. Review data below.' });
         setOcrRunning(false);
         return;
       }
 
-      // Attempt #2: English + Arabic
-      setMessage({ kind: 'info', text: 'OCR محاولة #2: إنجليزي + عربي…' });
+      // Attempt #2: English only with PSM 11 (sparse text)
+      setMessage({ kind: 'info', text: 'OCR Attempt #2: English only (PSM 11 fallback)...' });
+      setOcrProgress(0);
+
+      const worker1b = await createWorker('eng', 1, {
+        logger: (m) => {
+          if (m.status === 'recognizing text') {
+            setOcrProgress(Math.round(m.progress * 100));
+          }
+        }
+      });
+
+      await worker1b.setParameters({
+        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+        user_defined_dpi: '300',
+      });
+
+      const { data: { text: text1b } } = await worker1b.recognize(canvas);
+      await worker1b.terminate();
+
+      const parsed1b = parseNutritionLabel(text1b);
+
+      if (isParseSuccessful(parsed1b)) {
+        setRawText(text1b);
+        setOcrMode('eng');
+        fillFields(parsed1b);
+        setMessage({ kind: 'info', text: 'Analysis successful using English (PSM 11). Review data below.' });
+        setOcrRunning(false);
+        return;
+      }
+
+      // Attempt #3: English + Arabic with PSM 6
+      setMessage({ kind: 'info', text: 'OCR Attempt #3: English + Arabic (PSM 6)...' });
       setOcrProgress(0);
 
       const worker2 = await createWorker(['eng', 'ara'], 1, {
@@ -426,6 +620,11 @@ export const NutritionLabelScanPage = () => {
             setOcrProgress(Math.round(m.progress * 100));
           }
         }
+      });
+
+      await worker2.setParameters({
+        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+        user_defined_dpi: '300',
       });
 
       const { data: { text: text2 } } = await worker2.recognize(canvas);
@@ -438,15 +637,45 @@ export const NutritionLabelScanPage = () => {
       fillFields(parsed2);
 
       if (isParseSuccessful(parsed2)) {
-        setMessage({ kind: 'info', text: 'تم التحليل باستخدام الإنجليزية + العربية. راجع البيانات أدناه.' });
+        setMessage({ kind: 'info', text: 'Analysis successful using English + Arabic. Review data below.' });
       } else {
-        setMessage({
-          kind: 'error',
-          text: 'تعذر استخراج البيانات الكاملة. يرجى مراجعة النص الخام والإدخال اليدوي للحقول المفقودة.'
+        // Attempt #4: English + Arabic with PSM 11 fallback
+        setMessage({ kind: 'info', text: 'OCR Attempt #4: English + Arabic (PSM 11 fallback)...' });
+        setOcrProgress(0);
+
+        const worker2b = await createWorker(['eng', 'ara'], 1, {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setOcrProgress(Math.round(m.progress * 100));
+            }
+          }
         });
+
+        await worker2b.setParameters({
+          tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+          user_defined_dpi: '300',
+        });
+
+        const { data: { text: text2b } } = await worker2b.recognize(canvas);
+        await worker2b.terminate();
+
+        const parsed2b = parseNutritionLabel(text2b);
+
+        setRawText(text2b);
+        setOcrMode('eng+ara');
+        fillFields(parsed2b);
+
+        if (isParseSuccessful(parsed2b)) {
+          setMessage({ kind: 'info', text: 'Analysis successful using English + Arabic (PSM 11). Review data below.' });
+        } else {
+          setMessage({
+            kind: 'error',
+            text: 'Could not extract complete data. Please review raw text and manually input missing fields.'
+          });
+        }
       }
     } catch (err: any) {
-      setMessage({ kind: 'error', text: `خطأ OCR: ${err?.message || 'غير معروف'}` });
+      setMessage({ kind: 'error', text: `OCR Error: ${err?.message || 'Unknown'}` });
     } finally {
       setOcrRunning(false);
     }
@@ -485,7 +714,7 @@ export const NutritionLabelScanPage = () => {
   const addToToday = async () => {
     const totalCals = computeTotalCalories();
     if (!totalCals) {
-      setMessage({ kind: 'error', text: 'يرجى ملء السعرات لكل حصة وحجم الحصة وكمية الاستهلاك.' });
+      setMessage({ kind: 'error', text: 'Please fill in calories per serving, serving size, and consumed quantity.' });
       return;
     }
 
@@ -506,16 +735,16 @@ export const NutritionLabelScanPage = () => {
         carbs: Number.isFinite(c) ? c : undefined,
         fats: Number.isFinite(f) ? f : undefined,
         servingSize: Number.isFinite(consumedServings) ? consumedServings : undefined,
-        productName: 'ملصق تغذية (OCR)',
+        productName: 'Nutrition Label (OCR)',
         confidence: 0.7
       };
 
       await foodLog.setItem(entry.id, entry);
 
-      setMessage({ kind: 'info', text: 'تمت الإضافة بنجاح. سيتم تحويلك للوحة التحكم.' });
+      setMessage({ kind: 'info', text: 'Added successfully. Redirecting to dashboard.' });
       setTimeout(() => navigate('/dashboard', { replace: true }), 500);
     } catch {
-      setMessage({ kind: 'error', text: 'حدث خطأ أثناء حفظ سجل الطعام.' });
+      setMessage({ kind: 'error', text: 'Error occurred while saving food log entry.' });
     } finally {
       setAdding(false);
     }
@@ -526,20 +755,20 @@ export const NutritionLabelScanPage = () => {
       <Card>
         <Header>
           <div>
-            <h1>تصوير ملصق التغذية</h1>
+            <h1>Nutrition Label Scan</h1>
             <p>
-              التقط صورة لملصق التغذية، وسيحلل التطبيق النص تلقائياً. المحاولة الأولى: إنجليزي فقط.
-              إذا فشل الاستخراج، سيحاول مرة أخرى بالإنجليزي + العربي.
+              Capture a nutrition label photo, and the app will analyze the text automatically.
+              First attempt: English only. If extraction fails, it will retry with English + Arabic.
             </p>
           </div>
           <Actions>
             <Button $variant="ghost" onClick={() => navigate('/dashboard', { replace: true })}>
-              رجوع للوحة التحكم
+              Back to Dashboard
             </Button>
             {!cameraActive ? (
-              <Button $variant="primary" onClick={startCamera}>تشغيل الكاميرا</Button>
+              <Button $variant="primary" onClick={startCamera}>Start Camera</Button>
             ) : (
-              <Button $variant="danger" onClick={stopCamera}>إيقاف الكاميرا</Button>
+              <Button $variant="danger" onClick={stopCamera}>Stop Camera</Button>
             )}
           </Actions>
         </Header>
@@ -551,13 +780,65 @@ export const NutritionLabelScanPage = () => {
 
         {cameraActive && (
           <Box style={{ marginTop: 12 }}>
+            <h2>Crop & Preprocess Settings</h2>
+            <p className="muted">Adjust crop area and preprocessing mode for better OCR accuracy.</p>
+
+            <Label>Crop Percentage: {cropPercent}%</Label>
+            <Slider
+              type="range"
+              min="50"
+              max="100"
+              step="5"
+              value={cropPercent}
+              onChange={(e) => setCropPercent(Number(e.target.value))}
+            />
+
+            <div style={{ marginTop: 12 }}>
+              <Label>Preprocessing Mode</Label>
+              <Select
+                value={preprocessMode}
+                onChange={(e) => setPreprocessMode(e.target.value as PreprocessMode)}
+              >
+                <option value="grayscale-threshold">Grayscale + Threshold (Default)</option>
+                <option value="adaptive-threshold">Adaptive Threshold</option>
+                <option value="none">None (Original)</option>
+              </Select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <CheckboxLabel>
+                <input
+                  type="checkbox"
+                  checked={showPreview}
+                  onChange={(e) => {
+                    setShowPreview(e.target.checked);
+                    if (e.target.checked) updatePreview();
+                  }}
+                />
+                Show preprocessed preview
+              </CheckboxLabel>
+            </div>
+
+            {showPreview && (
+              <div style={{ marginTop: 12 }}>
+                <PreviewCanvas ref={previewCanvasRef} />
+                <Button
+                  $variant="ghost"
+                  onClick={updatePreview}
+                  style={{ marginTop: 8, width: '100%' }}
+                >
+                  Refresh Preview
+                </Button>
+              </div>
+            )}
+
             <Button
               $variant="primary"
               onClick={captureAndOCR}
               disabled={ocrRunning}
-              style={{ width: '100%' }}
+              style={{ width: '100%', marginTop: 12 }}
             >
-              {ocrRunning ? `جاري التحليل… ${ocrProgress}%` : 'التقاط وتحليل'}
+              {ocrRunning ? `Analyzing... ${ocrProgress}%` : 'Capture & Analyze'}
             </Button>
           </Box>
         )}
@@ -567,7 +848,7 @@ export const NutritionLabelScanPage = () => {
         {ocrMode && (
           <Box>
             <h2>
-              وضع OCR المستخدم:
+              OCR Mode Used:
               <Badge $color={ocrMode === 'eng' ? 'green' : 'orange'}>
                 {ocrMode === 'eng' ? 'English' : 'English + Arabic'}
               </Badge>
@@ -575,7 +856,7 @@ export const NutritionLabelScanPage = () => {
 
             {rawText && (
               <RawText>
-                <summary>عرض النص الخام (Raw OCR Text)</summary>
+                <summary>View Raw OCR Text</summary>
                 <pre>{rawText}</pre>
               </RawText>
             )}
@@ -584,26 +865,26 @@ export const NutritionLabelScanPage = () => {
 
         {(caloriesPerServing !== '' || rawText) && (
           <Box>
-            <h2>مراجعة وتعديل البيانات المستخرجة</h2>
-            <p className="muted">يرجى التأكد من صحة الحقول التالية وتعديلها إذا لزم الأمر.</p>
+            <h2>Review & Edit Extracted Data</h2>
+            <p className="muted">Please verify the following fields and edit if necessary.</p>
 
             <TwoCol>
               <div>
-                <Label>السعرات لكل حصة (Calories / Serving) *</Label>
+                <Label>Calories per Serving *</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 120"
+                  placeholder="e.g. 120"
                   value={caloriesPerServing}
                   onChange={(e) => setCaloriesPerServing(e.target.value === '' ? '' : Number(e.target.value))}
                 />
               </div>
               <div>
-                <Label>عدد الحصص في العبوة (Servings / Container)</Label>
+                <Label>Servings per Container</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 2"
+                  placeholder="e.g. 2"
                   value={servingsPerContainer}
                   onChange={(e) => setServingsPerContainer(e.target.value === '' ? '' : Number(e.target.value))}
                 />
@@ -612,41 +893,41 @@ export const NutritionLabelScanPage = () => {
 
             <TwoCol>
               <div>
-                <Label>حجم الحصة - قيمة (Serving Size - Value) *</Label>
+                <Label>Serving Size - Value *</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 250"
+                  placeholder="e.g. 250"
                   value={servingSizeValue}
                   onChange={(e) => setServingSizeValue(e.target.value === '' ? '' : Number(e.target.value))}
                 />
               </div>
               <div>
-                <Label>حجم الحصة - وحدة (Serving Size - Unit) *</Label>
+                <Label>Serving Size - Unit *</Label>
                 <Select value={servingSizeUnit} onChange={(e) => setServingSizeUnit(e.target.value as 'ml' | 'g')}>
-                  <option value="ml">ml (مل)</option>
-                  <option value="g">g (جم)</option>
+                  <option value="ml">ml</option>
+                  <option value="g">g</option>
                 </Select>
               </div>
             </TwoCol>
 
             <TwoCol>
               <div>
-                <Label>Protein / Serving (g)</Label>
+                <Label>Protein per Serving (g)</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 8"
+                  placeholder="e.g. 8"
                   value={protein}
                   onChange={(e) => setProtein(e.target.value === '' ? '' : Number(e.target.value))}
                 />
               </div>
               <div>
-                <Label>Carbs / Serving (g)</Label>
+                <Label>Carbs per Serving (g)</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 25"
+                  placeholder="e.g. 25"
                   value={carbs}
                   onChange={(e) => setCarbs(e.target.value === '' ? '' : Number(e.target.value))}
                 />
@@ -655,11 +936,11 @@ export const NutritionLabelScanPage = () => {
 
             <TwoCol>
               <div>
-                <Label>Fats / Serving (g)</Label>
+                <Label>Fats per Serving (g)</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder="مثال: 3"
+                  placeholder="e.g. 3"
                   value={fats}
                   onChange={(e) => setFats(e.target.value === '' ? '' : Number(e.target.value))}
                 />
@@ -670,27 +951,27 @@ export const NutritionLabelScanPage = () => {
 
         {(caloriesPerServing !== '' || rawText) && (
           <Box>
-            <h2>كمية الاستهلاك</h2>
-            <p className="muted">أدخل عدد الحصص المستهلكة أو الكمية بالـ ml/g.</p>
+            <h2>Consumption Quantity</h2>
+            <p className="muted">Enter servings consumed or quantity in ml/g.</p>
 
             <TwoCol>
               <div>
-                <Label>عدد الحصص المستهلكة (Servings Consumed)</Label>
+                <Label>Servings Consumed</Label>
                 <Input
                   type="number"
                   min="0"
                   step="0.1"
-                  placeholder="مثال: 1"
+                  placeholder="e.g. 1"
                   value={consumedServings}
                   onChange={(e) => setConsumedServings(Number(e.target.value))}
                 />
               </div>
               <div>
-                <Label>أو الكمية بالـ {servingSizeUnit} (Quantity)</Label>
+                <Label>Or Quantity in {servingSizeUnit}</Label>
                 <Input
                   type="number"
                   min="0"
-                  placeholder={`مثال: ${servingSizeValue || 250}`}
+                  placeholder={`e.g. ${servingSizeValue || 250}`}
                   value={consumedQuantity}
                   onChange={(e) => setConsumedQuantity(e.target.value === '' ? '' : Number(e.target.value))}
                 />
@@ -699,19 +980,19 @@ export const NutritionLabelScanPage = () => {
 
             <TwoCol>
               <div>
-                <Label>إجمالي السعرات المحسوبة (Total Calories)</Label>
+                <Label>Total Calories Computed</Label>
                 <Input readOnly value={computeTotalCalories() ?? '—'} />
               </div>
               <div style={{ display: 'flex', alignItems: 'end', gap: 10, flexWrap: 'wrap' }}>
                 <Button $variant="primary" onClick={addToToday} disabled={adding || !computeTotalCalories()}>
-                  {adding ? 'جاري الإضافة…' : 'أضف لاستهلاك اليوم'}
+                  {adding ? 'Adding...' : 'Add to Today'}
                 </Button>
-                <Button $variant="ghost" onClick={startCamera}>تصوير ملصق آخر</Button>
+                <Button $variant="ghost" onClick={startCamera}>Scan Another</Button>
               </div>
             </TwoCol>
 
             <Message $kind="info" style={{ marginTop: 12 }}>
-              نصيحة: ثبّت الهاتف جيداً وتأكد من وضوح الملصق. إذا كانت النتائج غير دقيقة، قم بالتعديل اليدوي.
+              Tip: Hold phone steady and ensure label is clear. If results are inaccurate, manually edit the fields.
             </Message>
           </Box>
         )}
