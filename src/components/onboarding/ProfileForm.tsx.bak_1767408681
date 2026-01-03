@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import styled from 'styled-components';
-import { useNavigate } from 'react-router-dom';
 import { MetabolicEngine } from '../../lib/calculations/metabolic-engine';
 import { CryptoEngine } from '../../lib/crypto/aes-encryption';
 import { UserProfile } from '../../types/health';
@@ -75,8 +74,6 @@ const ErrorMessage = styled.p`
 `;
 
 export const ProfileForm = () => {
-  const navigate = useNavigate();
-
   const [formData, setFormData] = useState<Partial<UserProfile>>({
     weight: undefined,
     height: undefined,
@@ -85,7 +82,6 @@ export const ProfileForm = () => {
     activityLevel: undefined,
     goal: 'general_health'
   });
-
   const [errors, setErrors] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -106,7 +102,6 @@ export const ProfileForm = () => {
 
     try {
       const profileId = crypto.randomUUID();
-
       const bmr = MetabolicEngine.calculateBMR(formData as any);
       const tdee = MetabolicEngine.calculateTDEE(bmr, formData.activityLevel!);
       const macros = MetabolicEngine.calculateMacros(tdee);
@@ -126,11 +121,9 @@ export const ProfileForm = () => {
       const { userProfiles } = await initDatabase();
       await userProfiles.setItem(profileId, encryptedData);
 
-      // Save "last profile id" so /dashboard can open without params
-      localStorage.setItem('healthpmp_last_profile_id', profileId);
+      console.log('Profile saved successfully:', profileId);
+      window.location.href = '/dashboard';
 
-      // Navigate within SPA instead of hard reload
-      navigate(`/dashboard/${profileId}`, { replace: true });
     } catch (error) {
       setErrors(['حدث خطأ أثناء حفظ البيانات. الرجاء المحاولة مرة أخرى.']);
     } finally {
