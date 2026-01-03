@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { useNavigate } from 'react-router-dom';
-import { createWorker, PSM } from 'tesseract.js';
 import { initDatabase } from '../lib/database/indexeddb';
 import type { FoodLogEntry } from '../types/health';
+import { applyCrop, applyDownscale, applyPreprocessing, type PreprocessMode } from '../lib/ocr/imagePipeline';
+import { parseNutritionLabel, isParseSuccessful, type ParsedData } from '../lib/ocr/nutritionParser';
+import { runOcrWithFallbacks } from '../lib/ocr/tesseractRunner';
 
 const Page = styled.div`
   min-block-size: 100vh;
@@ -221,75 +223,6 @@ const CheckboxLabel = styled.label`
   }
 `;
 
-type ParsedData = {
-  caloriesPerServing: number | null;
-  servingsPerContainer: number | null;
-  servingSizeValue: number | null;
-  servingSizeUnit: 'ml' | 'g' | null;
-  protein: number | null;
-  carbs: number | null;
-  fats: number | null;
-};
-
-function parseNutritionLabel(text: string): ParsedData {
-  const result: ParsedData = {
-    caloriesPerServing: null,
-    servingsPerContainer: null,
-    servingSizeValue: null,
-    servingSizeUnit: null,
-    protein: null,
-    carbs: null,
-    fats: null,
-  };
-
-  // Calories - enhanced with "Calor" fallback and Arabic
-  let match = text.match(/Calories\s*([0-9]{1,4})/i);
-  if (!match) match = text.match(/Calor[a-z]*\s*([0-9]{1,4})/i);
-  if (!match) match = text.match(/السعرات(?:\s*الحرارية)?\s*([0-9]{1,4})/i);
-  if (match) result.caloriesPerServing = Number(match[1]);
-
-  // Servings per container
-  match = text.match(/servings?\s*per\s*container\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (!match) match = text.match(/عدد\s*الحصص\s*(?:في\s*العبوة)?\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (match) result.servingsPerContainer = Number(match[1]);
-
-  // Serving size - enhanced patterns
-  match = text.match(/Serving\s*Size\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(ml|mL|g|gm|grams)/i);
-  if (!match) match = text.match(/حجم\s*الحصة\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(مل|ml|جم|g)/i);
-  if (match) {
-    result.servingSizeValue = Number(match[1]);
-    const unit = match[2].toLowerCase();
-    if (unit.includes('ml') || unit.includes('مل')) {
-      result.servingSizeUnit = 'ml';
-    } else {
-      result.servingSizeUnit = 'g';
-    }
-  }
-
-  // Protein
-  match = text.match(/Protein\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (!match) match = text.match(/بروتين\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (match) result.protein = Number(match[1]);
-
-  // Carbs
-  match = text.match(/Carbohydrate[s]?\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (!match) match = text.match(/الكربوهيدرات\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (match) result.carbs = Number(match[1]);
-
-  // Fats
-  match = text.match(/Total\s*Fat\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (!match) match = text.match(/الدهون\s*الكلية\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (match) result.fats = Number(match[1]);
-
-  return result;
-}
-
-function isParseSuccessful(data: ParsedData): boolean {
-  return data.caloriesPerServing !== null && data.servingSizeValue !== null;
-}
-
-type PreprocessMode = 'grayscale-threshold' | 'adaptive-threshold' | 'none';
-
 export const NutritionLabelScanPage = () => {
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -368,114 +301,6 @@ export const NutritionLabelScanPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const applyCrop = (sourceCanvas: HTMLCanvasElement, cropPercentage: number): HTMLCanvasElement => {
-    const cropCanvas = document.createElement('canvas');
-    const ctx = cropCanvas.getContext('2d');
-    if (!ctx) return sourceCanvas;
-
-    const cropFraction = cropPercentage / 100;
-    const cropWidth = Math.floor(sourceCanvas.width * cropFraction);
-    const cropHeight = Math.floor(sourceCanvas.height * cropFraction);
-    const startX = Math.floor((sourceCanvas.width - cropWidth) / 2);
-    const startY = Math.floor((sourceCanvas.height - cropHeight) / 2);
-
-    cropCanvas.width = cropWidth;
-    cropCanvas.height = cropHeight;
-
-    ctx.drawImage(
-      sourceCanvas,
-      startX, startY, cropWidth, cropHeight,
-      0, 0, cropWidth, cropHeight
-    );
-
-    return cropCanvas;
-  };
-
-  const applyDownscale = (sourceCanvas: HTMLCanvasElement, maxDim: number): HTMLCanvasElement => {
-    const scale = Math.min(maxDim / sourceCanvas.width, maxDim / sourceCanvas.height, 1);
-
-    if (scale >= 1) return sourceCanvas;
-
-    const downscaleCanvas = document.createElement('canvas');
-    const ctx = downscaleCanvas.getContext('2d');
-    if (!ctx) return sourceCanvas;
-
-    const newWidth = Math.floor(sourceCanvas.width * scale);
-    const newHeight = Math.floor(sourceCanvas.height * scale);
-
-    downscaleCanvas.width = newWidth;
-    downscaleCanvas.height = newHeight;
-    ctx.drawImage(sourceCanvas, 0, 0, newWidth, newHeight);
-
-    return downscaleCanvas;
-  };
-
-  const applyPreprocessing = (sourceCanvas: HTMLCanvasElement, mode: PreprocessMode): HTMLCanvasElement => {
-    if (mode === 'none') return sourceCanvas;
-
-    const processCanvas = document.createElement('canvas');
-    const ctx = processCanvas.getContext('2d');
-    if (!ctx) return sourceCanvas;
-
-    processCanvas.width = sourceCanvas.width;
-    processCanvas.height = sourceCanvas.height;
-    ctx.drawImage(sourceCanvas, 0, 0);
-
-    const imageData = ctx.getImageData(0, 0, processCanvas.width, processCanvas.height);
-    const data = imageData.data;
-
-    if (mode === 'grayscale-threshold') {
-      for (let i = 0; i < data.length; i += 4) {
-        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        const contrast = 1.5;
-        let adjusted = ((gray - 128) * contrast) + 128;
-        adjusted = adjusted > 128 ? 255 : 0;
-        data[i] = data[i + 1] = data[i + 2] = adjusted;
-      }
-    } else if (mode === 'adaptive-threshold') {
-      // Simple adaptive threshold (local mean)
-      const blockSize = 15;
-      const C = 10;
-      const width = processCanvas.width;
-      const height = processCanvas.height;
-
-      // Convert to grayscale first
-      const grayData = new Uint8ClampedArray(width * height);
-      for (let i = 0; i < data.length; i += 4) {
-        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        grayData[i / 4] = gray;
-      }
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let sum = 0;
-          let count = 0;
-
-          for (let by = -Math.floor(blockSize / 2); by <= Math.floor(blockSize / 2); by++) {
-            for (let bx = -Math.floor(blockSize / 2); bx <= Math.floor(blockSize / 2); bx++) {
-              const nx = x + bx;
-              const ny = y + by;
-              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                sum += grayData[ny * width + nx];
-                count++;
-              }
-            }
-          }
-
-          const mean = sum / count;
-          const pixel = grayData[y * width + x];
-          const threshold = pixel > (mean - C) ? 255 : 0;
-
-          const idx = (y * width + x) * 4;
-          data[idx] = data[idx + 1] = data[idx + 2] = threshold;
-        }
-      }
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-    return processCanvas;
-  };
-
   const updatePreview = () => {
     const video = videoRef.current;
     const previewCanvas = previewCanvasRef.current;
@@ -549,130 +374,29 @@ export const NutritionLabelScanPage = () => {
     setOcrMode(null);
 
     try {
-      // Attempt #1: English only with PSM 6 (uniform block of text)
-      setMessage({ kind: 'info', text: 'OCR Attempt #1: English only (PSM 6)...' });
-      const worker1 = await createWorker('eng', 1, {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            setOcrProgress(Math.round(m.progress * 100));
-          }
-        }
+      const result = await runOcrWithFallbacks(canvas, {
+        onProgress: (progress) => setOcrProgress(progress),
+        onMessage: (msg) => setMessage({ kind: 'info', text: msg }),
       });
 
-      await worker1.setParameters({
-        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
-        user_defined_dpi: '300',
-      });
+      // Set raw text and OCR mode
+      setRawText(result.text);
+      setOcrMode(result.usedLang);
 
-      const { data: { text: text1 } } = await worker1.recognize(canvas);
-      await worker1.terminate();
+      // Parse and fill fields
+      const parsed = parseNutritionLabel(result.text);
+      fillFields(parsed);
 
-      const parsed1 = parseNutritionLabel(text1);
-
-      if (isParseSuccessful(parsed1)) {
-        // Success with English PSM 6
-        setRawText(text1);
-        setOcrMode('eng');
-        fillFields(parsed1);
-        setMessage({ kind: 'info', text: 'Analysis successful using English only. Review data below.' });
-        setOcrRunning(false);
-        return;
-      }
-
-      // Attempt #2: English only with PSM 11 (sparse text)
-      setMessage({ kind: 'info', text: 'OCR Attempt #2: English only (PSM 11 fallback)...' });
-      setOcrProgress(0);
-
-      const worker1b = await createWorker('eng', 1, {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            setOcrProgress(Math.round(m.progress * 100));
-          }
-        }
-      });
-
-      await worker1b.setParameters({
-        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-        user_defined_dpi: '300',
-      });
-
-      const { data: { text: text1b } } = await worker1b.recognize(canvas);
-      await worker1b.terminate();
-
-      const parsed1b = parseNutritionLabel(text1b);
-
-      if (isParseSuccessful(parsed1b)) {
-        setRawText(text1b);
-        setOcrMode('eng');
-        fillFields(parsed1b);
-        setMessage({ kind: 'info', text: 'Analysis successful using English (PSM 11). Review data below.' });
-        setOcrRunning(false);
-        return;
-      }
-
-      // Attempt #3: English + Arabic with PSM 6
-      setMessage({ kind: 'info', text: 'OCR Attempt #3: English + Arabic (PSM 6)...' });
-      setOcrProgress(0);
-
-      const worker2 = await createWorker(['eng', 'ara'], 1, {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            setOcrProgress(Math.round(m.progress * 100));
-          }
-        }
-      });
-
-      await worker2.setParameters({
-        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
-        user_defined_dpi: '300',
-      });
-
-      const { data: { text: text2 } } = await worker2.recognize(canvas);
-      await worker2.terminate();
-
-      const parsed2 = parseNutritionLabel(text2);
-
-      setRawText(text2);
-      setOcrMode('eng+ara');
-      fillFields(parsed2);
-
-      if (isParseSuccessful(parsed2)) {
-        setMessage({ kind: 'info', text: 'Analysis successful using English + Arabic. Review data below.' });
+      // Set success message based on result
+      if (isParseSuccessful(parsed)) {
+        const langStr = result.usedLang === 'eng' ? 'English only' : 'English + Arabic';
+        const psmStr = result.usedPsm === 11 ? ' (PSM 11)' : '';
+        setMessage({ kind: 'info', text: `Analysis successful using ${langStr}${psmStr}. Review data below.` });
       } else {
-        // Attempt #4: English + Arabic with PSM 11 fallback
-        setMessage({ kind: 'info', text: 'OCR Attempt #4: English + Arabic (PSM 11 fallback)...' });
-        setOcrProgress(0);
-
-        const worker2b = await createWorker(['eng', 'ara'], 1, {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              setOcrProgress(Math.round(m.progress * 100));
-            }
-          }
+        setMessage({
+          kind: 'error',
+          text: 'Could not extract complete data. Please review raw text and manually input missing fields.'
         });
-
-        await worker2b.setParameters({
-          tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-          user_defined_dpi: '300',
-        });
-
-        const { data: { text: text2b } } = await worker2b.recognize(canvas);
-        await worker2b.terminate();
-
-        const parsed2b = parseNutritionLabel(text2b);
-
-        setRawText(text2b);
-        setOcrMode('eng+ara');
-        fillFields(parsed2b);
-
-        if (isParseSuccessful(parsed2b)) {
-          setMessage({ kind: 'info', text: 'Analysis successful using English + Arabic (PSM 11). Review data below.' });
-        } else {
-          setMessage({
-            kind: 'error',
-            text: 'Could not extract complete data. Please review raw text and manually input missing fields.'
-          });
-        }
       }
     } catch (err: any) {
       setMessage({ kind: 'error', text: `OCR Error: ${err?.message || 'Unknown'}` });
